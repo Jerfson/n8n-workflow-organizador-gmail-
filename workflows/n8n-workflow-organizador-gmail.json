@@ -1,0 +1,830 @@
+{
+  "name": "Organizador Automático de E-mails Gmail",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📬 Organizador Automático de E-mails (Gmail)\n\n**O que este fluxo faz**\n1. A cada **5 minutos**, busca e-mails **não lidos** da **Caixa de Entrada**.\n2. Um nó **Code** classifica cada e-mail em: `Urgent`, `Financial`, `Work`, `Promotions` ou `Personal`.\n3. Um nó **Switch** roteia para 5 ramos independentes, cada um com as ações do Gmail correspondentes.\n4. Um **Error Trigger** avisa por e-mail se algo falhar.\n\n**Ordem de prioridade da classificação**\n`Urgent` → `Financial` → `Work` → `Promotions` → `Personal`\n(o primeiro critério que der match vence; `Personal` é o fallback)\n\n**Credenciais necessárias**\n- **Gmail OAuth2** (ler e modificar e-mails) — todos os nós do Gmail\n- **Telegram** (opcional) — usado só no ramo Urgent\n\n⚠️ **Antes de ativar:** crie as etiquetas `URGENT`, `FINANCIAL`, `WORK`, `PROMOTIONS` e `PERSONAL` no Gmail e selecione os IDs reais nos nós de etiqueta.",
+        "height": 1240,
+        "width": 460,
+        "color": 4
+      },
+      "id": "11111111-1111-4111-8111-000000000001",
+      "name": "📌 Visão Geral do Fluxo",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1480, -620]
+    },
+    {
+      "parameters": {
+        "content": "## 1️⃣ Gatilho — Gmail Trigger\n\n- **Poll Times:** a cada 5 minutos (`*/5 * * * *`)\n- **Filtros:** somente **não lidos** (`is:unread`) e apenas **Caixa de Entrada** (`label:inbox`)\n- **Simplify:** ligado, para receber `headers.subject` e `headers.from` já prontos\n\nEste é o único ponto de entrada do fluxo.",
+        "height": 130,
+        "width": 380,
+        "color": 5
+      },
+      "id": "11111111-1111-4111-8111-000000000002",
+      "name": "Nota - Gatilho Gmail",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-980, -40]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "custom",
+              "cronExpression": "*/5 * * * *"
+            }
+          ]
+        },
+        "simple": true,
+        "filters": {
+          "q": "is:unread label:inbox",
+          "readStatus": "unread",
+          "labelIds": ["INBOX"],
+          "includeSpamTrash": false
+        },
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-000000000003",
+      "name": "Gatilho Gmail - Novos E-mails Não Lidos",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [-940, 100],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Verifica a cada 5 minutos se há e-mails não lidos na Caixa de Entrada."
+    },
+    {
+      "parameters": {
+        "content": "## 2️⃣ Classificação — Code\n\nLê **assunto** e **remetente** e devolve `category` + `motivo`.\n\nRegras (em ordem de prioridade):\n- **Urgent**: urgent, importante, asap, critical, emergência\n- **Financial**: bank, nubank, itau, bradesco, invoice, boleto, fatura, pix\n- **Work**: @company, @work e domínios corporativos\n- **Promotions**: promotion, offer, discount, coupon, promoção, desconto\n- **Personal**: fallback (todo o resto)\n\nAcentos são normalizados, então `itaú` = `itau`.",
+        "height": 130,
+        "width": 380,
+        "color": 5
+      },
+      "id": "11111111-1111-4111-8111-000000000004",
+      "name": "Nota - Classificação por Código",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-740, -40]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CLASSIFICADOR AUTOMÁTICO DE E-MAILS\n// Entrada: itens do gatilho do Gmail\n// Saída:   item + { category, motivo, palavraChave, subject, from, ... }\n// ============================================================\n\n// --- 1. Palavras-chave do ASSUNTO que indicam URGÊNCIA ---\nconst PALAVRAS_URGENTE = [\n  'urgent', 'urgente', 'urgencia', 'importante', 'important',\n  'asap', 'critical', 'critico', 'emergencia', 'prioridade',\n];\n\n// --- 2. Palavras-chave do REMETENTE que indicam FINANCEIRO ---\nconst PALAVRAS_FINANCEIRO = [\n  'bank', 'banco', 'nubank', 'itau', 'itaú', 'bradesco', 'santander',\n  'caixa economica', 'invoice', 'boleto', 'payment slip', 'fatura',\n  'pagamento', 'pix', 'cartao', 'cartão', 'financ',\n];\n\n// --- 3. Domínios / marcadores CORPORATIVOS (ajuste para a sua empresa) ---\nconst DOMINIOS_CORPORATIVOS = [\n  '@company', '@work', '@empresa.com', '@empresa.com.br',\n  '@corp.', '@grupocorp', '@company.com',\n];\n\n// --- 4. Palavras-chave do ASSUNTO que indicam PROMOÇÃO ---\nconst PALAVRAS_PROMOCAO = [\n  'promotion', 'promocao', 'promoção', 'offer', 'oferta',\n  'discount', 'desconto', 'coupon', 'cupom', 'sale', 'black friday',\n];\n\n// ------------------------------------------------------------\n// Helpers\n// ------------------------------------------------------------\n\n/** Remove acentos, deixa minúsculo e apara espaços. */\nconst normalizar = (valor) =>\n  String(valor === undefined || valor === null ? '' : valor)\n    .toLowerCase()\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .trim();\n\n/** Retorna a primeira palavra-chave encontrada no texto, ou null. */\nconst encontrar = (textoNormalizado, lista) =>\n  lista.find((palavra) => textoNormalizado.includes(normalizar(palavra))) || null;\n\n/** Extrai um cabeçalho do formato bruto do Gmail (payload.headers). */\nconst acharHeaderBruto = (lista, nome) => {\n  const achado = lista.find((h) => normalizar(h && h.name) === nome);\n  return achado && achado.value ? achado.value : '';\n};\n\n// ------------------------------------------------------------\n// Classificação item a item\n// ------------------------------------------------------------\n\nreturn items.map((item) => {\n  const json = item.json || {};\n  const headers = json.headers || {};\n  const headersBrutos = Array.isArray(json.payload?.headers) ? json.payload.headers : [];\n\n  const assunto =\n    json.subject || headers.subject || headers.Subject ||\n    acharHeaderBruto(headersBrutos, 'subject') || '(sem assunto)';\n\n  const remetente =\n    json.from || headers.from || headers.From ||\n    acharHeaderBruto(headersBrutos, 'from') || '(remetente desconhecido)';\n\n  const destinatario =\n    json.to || headers.to || headers.To ||\n    acharHeaderBruto(headersBrutos, 'to') || '';\n\n  const data =\n    json.date || headers.date || headers.Date ||\n    acharHeaderBruto(headersBrutos, 'date') || '';\n\n  const resumo = json.snippet || json.textPlain || '';\n\n  const assuntoNormalizado = normalizar(assunto);\n  const remetenteNormalizado = normalizar(remetente);\n\n  let category = 'Personal';\n  let motivo = 'Nenhuma regra específica correspondeu (fallback: Personal).';\n  let palavraChave = null;\n\n  // Prioridade 1 - URGENTE (assunto)\n  if ((palavraChave = encontrar(assuntoNormalizado, PALAVRAS_URGENTE))) {\n    category = 'Urgent';\n    motivo = `Assunto contém o termo de urgência \"${palavraChave}\".`;\n  }\n  // Prioridade 2 - FINANCEIRO (remetente)\n  else if ((palavraChave = encontrar(remetenteNormalizado, PALAVRAS_FINANCEIRO))) {\n    category = 'Financial';\n    motivo = `Remetente contém o termo financeiro \"${palavraChave}\".`;\n  }\n  // Prioridade 3 - TRABALHO (remetente / domínio corporativo)\n  else if ((palavraChave = encontrar(remetenteNormalizado, DOMINIOS_CORPORATIVOS))) {\n    category = 'Work';\n    motivo = `Remetente pertence a domínio corporativo (\"${palavraChave}\").`;\n  }\n  // Prioridade 4 - PROMOÇÕES (assunto)\n  else if ((palavraChave = encontrar(assuntoNormalizado, PALAVRAS_PROMOCAO))) {\n    category = 'Promotions';\n    motivo = `Assunto contém o termo promocional \"${palavraChave}\".`;\n  }\n\n  return {\n    json: {\n      // --- campos originais preservados (usados pelos nós do Gmail) ---\n      id: json.id,\n      threadId: json.threadId,\n      labelIds: json.labelIds || [],\n      // --- resultado da classificação ---\n      category,\n      categoria: category,\n      motivo,\n      palavraChave,\n      // --- dados úteis para notificações ---\n      subject: assunto,\n      from: remetente,\n      to: destinatario,\n      date: data,\n      snippet: resumo,\n      recebidoEm: new Date().toISOString(),\n    },\n  };\n});"
+      },
+      "id": "11111111-1111-4111-8111-000000000005",
+      "name": "Classificar E-mail por Categoria",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-700, 100],
+      "notesInFlow": true,
+      "notes": "Classifica cada e-mail em Urgent / Financial / Work / Promotions / Personal."
+    },
+    {
+      "parameters": {
+        "content": "## 3️⃣ Roteamento — Switch\n\nCompara `{{ $json.category }}` e envia o item para o ramo correspondente:\n\n| Saída | Categoria |\n|-------|-----------|\n| 0 | Urgent |\n| 1 | Financial |\n| 2 | Work |\n| 3 | Promotions |\n| 4 | Personal |\n\nSem saída de fallback: o Code node sempre devolve uma categoria.",
+        "height": 130,
+        "width": 380,
+        "color": 5
+      },
+      "id": "11111111-1111-4111-8111-000000000006",
+      "name": "Nota - Roteador por Categoria",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-500, -40]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "regra-urgent",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "Urgent",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Urgent"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "regra-financial",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "Financial",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Financial"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "regra-work",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "Work",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Work"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "regra-promotions",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "Promotions",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Promotions"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "regra-personal",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "Personal",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Personal"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-000000000007",
+      "name": "Roteador por Categoria",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [-460, 100],
+      "notesInFlow": true,
+      "notes": "Direciona o e-mail para o ramo de ações correspondente à categoria."
+    },
+
+    {
+      "parameters": {
+        "content": "## 🚨 Ramo URGENT\n\n1. Aplica a etiqueta **URGENT**\n2. Notifica no **Telegram** (assunto + remetente + motivo)\n3. NoOp de encerramento\n\n> Não usa Telegram? Ative o nó *\"Urgente: E-mail de Backup\"* (desativado acima) e conecte-o no lugar do Telegram.",
+        "height": 120,
+        "width": 760,
+        "color": 3
+      },
+      "id": "11111111-1111-4111-8111-000000000008",
+      "name": "Nota - Ramo Urgente",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -580]
+    },
+    {
+      "parameters": {
+        "content": "## ✉️ Alternativa ao Telegram (desativada)\n\nEste nó envia um e-mail de alerta para você mesmo. Ele já está **desativado** — ative-o e ligue a saída do nó *\"Urgente: Aplicar Etiqueta URGENT\"* nele caso não use Telegram.",
+        "height": 120,
+        "width": 760,
+        "color": 7
+      },
+      "id": "11111111-1111-4111-8111-000000000009",
+      "name": "Nota - Backup por E-mail",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -860]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["URGENT"]
+      },
+      "id": "11111111-1111-4111-8111-000000000010",
+      "name": "Urgente: Aplicar Etiqueta URGENT",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [-120, -460],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Aplica a etiqueta URGENT. Selecione o ID real da etiqueta no parâmetro 'Label Names or IDs'."
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=🚨 <b>E-MAIL URGENTE</b>\n\n<b>Assunto:</b> {{ $('Classificar E-mail por Categoria').item.json.subject }}\n<b>De:</b> {{ $('Classificar E-mail por Categoria').item.json.from }}\n<b>Data:</b> {{ $('Classificar E-mail por Categoria').item.json.date }}\n<b>Motivo:</b> {{ $('Classificar E-mail por Categoria').item.json.motivo }}\n\n<b>Prévia:</b> {{ $('Classificar E-mail por Categoria').item.json.snippet }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false
+        }
+      },
+      "id": "11111111-1111-4111-8111-000000000011",
+      "name": "Urgente: Notificar no Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [160, -460],
+      "credentials": {
+        "telegramApi": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_TELEGRAM",
+          "name": "Telegram account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Envia assunto + remetente para o Telegram. Configure TELEGRAM_CHAT_ID ou troque por um chat ID fixo."
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $env.ALERT_EMAIL || 'seu-email@gmail.com' }}",
+        "subject": "=🚨 [ALERTA] E-mail URGENTE recebido: {{ $('Classificar E-mail por Categoria').item.json.subject }}",
+        "emailType": "html",
+        "message": "=<h3>🚨 E-mail classificado como URGENTE</h3>\n<p><b>Assunto:</b> {{ $('Classificar E-mail por Categoria').item.json.subject }}</p>\n<p><b>Remetente:</b> {{ $('Classificar E-mail por Categoria').item.json.from }}</p>\n<p><b>Data:</b> {{ $('Classificar E-mail por Categoria').item.json.date }}</p>\n<p><b>Motivo da classificação:</b> {{ $('Classificar E-mail por Categoria').item.json.motivo }}</p>\n<hr>\n<p>{{ $('Classificar E-mail por Categoria').item.json.snippet }}</p>",
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-000000000012",
+      "name": "Urgente: E-mail de Backup (Alternativa)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [-120, -740],
+      "disabled": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Alternativa ao Telegram: envia um e-mail de alerta para você mesmo. Nó desativado por padrão."
+    },
+    {
+      "parameters": {},
+      "id": "11111111-1111-4111-8111-000000000013",
+      "name": "Urgente: Fim do Fluxo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [440, -460],
+      "notesInFlow": true,
+      "notes": "Encerra o ramo de e-mails urgentes (documentação visual do fluxo)."
+    },
+
+    {
+      "parameters": {
+        "content": "## 💰 Ramo FINANCIAL\n\n1. Aplica a etiqueta **FINANCIAL**\n2. **Move para a pasta \"Financial\"** — no Gmail, pastas são etiquetas, então mover = aplicar FINANCIAL + remover a etiqueta `INBOX`\n3. NoOp de encerramento",
+        "height": 120,
+        "width": 760,
+        "color": 6
+      },
+      "id": "11111111-1111-4111-8111-000000000014",
+      "name": "Nota - Ramo Financeiro",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -300]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["FINANCIAL"]
+      },
+      "id": "11111111-1111-4111-8111-000000000015",
+      "name": "Financeiro: Aplicar Etiqueta FINANCIAL",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [-120, -180],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Aplica a etiqueta FINANCIAL (a 'pasta' Financeiro do Gmail)."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "removeLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["INBOX"]
+      },
+      "id": "11111111-1111-4111-8111-000000000016",
+      "name": "Financeiro: Mover para a Pasta Financial",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [160, -180],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Remove a etiqueta INBOX, concluindo a movimentação para a pasta Financial."
+    },
+    {
+      "parameters": {},
+      "id": "11111111-1111-4111-8111-000000000017",
+      "name": "Financeiro: Fim do Fluxo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [440, -180],
+      "notesInFlow": true,
+      "notes": "Encerra o ramo de e-mails financeiros (documentação visual do fluxo)."
+    },
+
+    {
+      "parameters": {
+        "content": "## 💼 Ramo WORK\n\n1. Aplica a etiqueta **WORK**\n2. **Marca com estrela** — no Gmail a estrela é a etiqueta de sistema `STARRED`\n3. NoOp de encerramento",
+        "height": 120,
+        "width": 760,
+        "color": 5
+      },
+      "id": "11111111-1111-4111-8111-000000000018",
+      "name": "Nota - Ramo Trabalho",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -20]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["WORK"]
+      },
+      "id": "11111111-1111-4111-8111-000000000019",
+      "name": "Trabalho: Aplicar Etiqueta WORK",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [-120, 100],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Aplica a etiqueta WORK."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["STARRED"]
+      },
+      "id": "11111111-1111-4111-8111-000000000020",
+      "name": "Trabalho: Marcar como Importante (Estrela)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [160, 100],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Marca o e-mail com estrela usando a etiqueta de sistema STARRED. Para 'Important', adicione também IMPORTANT."
+    },
+    {
+      "parameters": {},
+      "id": "11111111-1111-4111-8111-000000000021",
+      "name": "Trabalho: Fim do Fluxo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [440, 100],
+      "notesInFlow": true,
+      "notes": "Encerra o ramo de e-mails de trabalho (documentação visual do fluxo)."
+    },
+
+    {
+      "parameters": {
+        "content": "## 🏷️ Ramo PROMOTIONS\n\n1. Aplica a etiqueta **PROMOTIONS**\n2. **Arquiva** — remove a etiqueta `INBOX` (o e-mail sai da Caixa de Entrada e continua acessível em \"Todos os e-mails\")\n3. NoOp de encerramento",
+        "height": 120,
+        "width": 760,
+        "color": 2
+      },
+      "id": "11111111-1111-4111-8111-000000000022",
+      "name": "Nota - Ramo Promoções",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, 260]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["PROMOTIONS"]
+      },
+      "id": "11111111-1111-4111-8111-000000000023",
+      "name": "Promoções: Aplicar Etiqueta PROMOTIONS",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [-120, 380],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Aplica a etiqueta PROMOTIONS."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "removeLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["INBOX"]
+      },
+      "id": "11111111-1111-4111-8111-000000000024",
+      "name": "Promoções: Arquivar (Remover da Caixa de Entrada)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [160, 380],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Arquiva o e-mail removendo a etiqueta INBOX."
+    },
+    {
+      "parameters": {},
+      "id": "11111111-1111-4111-8111-000000000025",
+      "name": "Promoções: Fim do Fluxo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [440, 380],
+      "notesInFlow": true,
+      "notes": "Encerra o ramo de promoções (documentação visual do fluxo)."
+    },
+
+    {
+      "parameters": {
+        "content": "## 👤 Ramo PERSONAL\n\n1. Aplica a etiqueta **PERSONAL**\n2. NoOp de encerramento\n\nÉ o ramo de fallback: recebe tudo o que não casou com as regras anteriores.",
+        "height": 120,
+        "width": 760,
+        "color": 6
+      },
+      "id": "11111111-1111-4111-8111-000000000026",
+      "name": "Nota - Ramo Pessoal",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, 540]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["PERSONAL"]
+      },
+      "id": "11111111-1111-4111-8111-000000000027",
+      "name": "Pessoal: Aplicar Etiqueta PERSONAL",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [-120, 660],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Aplica a etiqueta PERSONAL."
+    },
+    {
+      "parameters": {},
+      "id": "11111111-1111-4111-8111-000000000028",
+      "name": "Pessoal: Fim do Fluxo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [160, 660],
+      "notesInFlow": true,
+      "notes": "Encerra o ramo de e-mails pessoais (documentação visual do fluxo)."
+    },
+
+    {
+      "parameters": {
+        "content": "## 4️⃣ Tratamento de Erros\n\n- **Error Trigger**: dispara sempre que **qualquer** execução deste fluxo falhar.\n- **Gmail (Send)**: envia um e-mail de alerta para você mesmo com o nome do fluxo, o nó que falhou, a mensagem de erro e o link da execução.\n\nAjuste o destinatário em `sendTo` (variável de ambiente `ALERT_EMAIL` ou e-mail fixo).",
+        "height": 130,
+        "width": 700,
+        "color": 3
+      },
+      "id": "11111111-1111-4111-8111-000000000029",
+      "name": "Nota - Tratamento de Erros",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-980, 620]
+    },
+    {
+      "parameters": {},
+      "id": "11111111-1111-4111-8111-000000000030",
+      "name": "Gatilho de Erro",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-940, 780],
+      "notesInFlow": true,
+      "notes": "Captura falhas de execução deste fluxo e alimenta o alerta por e-mail."
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $env.ALERT_EMAIL || 'seu-email@gmail.com' }}",
+        "subject": "=❌ [n8n] Falha no fluxo \"{{ $json.workflow.name }}\" (execução #{{ $json.execution.id }})",
+        "emailType": "html",
+        "message": "=<h3>❌ Falha na execução do Organizador de E-mails</h3>\n<p><b>Fluxo:</b> {{ $json.workflow.name }}</p>\n<p><b>ID da execução:</b> {{ $json.execution.id }}</p>\n<p><b>Nó com erro:</b> {{ $json.execution.lastNodeExecuted || 'não informado' }}</p>\n<p><b>Mensagem:</b> {{ $json.execution.error.message }}</p>\n<p><b>Link da execução:</b> <a href=\"{{ $json.execution.url }}\">{{ $json.execution.url || 'indisponível' }}</a></p>\n<hr>\n<h4>Stack trace</h4>\n<pre>{{ $json.execution.error.stack }}</pre>",
+        "options": {}
+      },
+      "id": "11111111-1111-4111-8111-000000000031",
+      "name": "Erro: Enviar E-mail de Alerta",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [-680, 780],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SUBSTITUA_PELO_ID_DA_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Envia o alerta de falha para você mesmo, com detalhes do erro e link da execução."
+    },
+
+    {
+      "parameters": {
+        "content": "## ⚙️ Configuração Obrigatória Antes de Ativar\n\n**1. Credenciais**\n- `Gmail OAuth2` em todos os nós do Gmail (escopos `gmail.modify` e `gmail.send`).\n- `Telegram` no nó *Urgente: Notificar no Telegram* (opcional — se não usar, ative o nó de backup por e-mail).\n\n**2. Etiquetas no Gmail**\nCrie as etiquetas `URGENT`, `FINANCIAL`, `WORK`, `PROMOTIONS` e `PERSONAL` no Gmail e **selecione os IDs reais** nos parâmetros *Label Names or IDs* dos nós de etiqueta (os nomes usados aqui são apenas placeholders).\n\n**3. Variáveis de ambiente (opcionais)**\n- `TELEGRAM_CHAT_ID` — chat de destino das notificações urgentes.\n- `ALERT_EMAIL` — destinatário dos alertas de erro.\n\n**4. Personalização**\n- Domínios corporativos: ajuste `DOMINIOS_CORPORATIVOS` no nó Code.\n- Palavras-chave: ajuste as listas no topo do nó Code.\n\n**5. Ordem de prioridade:** Urgent → Financial → Work → Promotions → Personal (fallback).",
+        "height": 340,
+        "width": 1400,
+        "color": 4
+      },
+      "id": "11111111-1111-4111-8111-000000000032",
+      "name": "Nota - Configuração Obrigatória",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-980, 950]
+    }
+  ],
+  "connections": {
+    "Gatilho Gmail - Novos E-mails Não Lidos": {
+      "main": [
+        [
+          {
+            "node": "Classificar E-mail por Categoria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classificar E-mail por Categoria": {
+      "main": [
+        [
+          {
+            "node": "Roteador por Categoria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Roteador por Categoria": {
+      "main": [
+        [
+          {
+            "node": "Urgente: Aplicar Etiqueta URGENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Financeiro: Aplicar Etiqueta FINANCIAL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Trabalho: Aplicar Etiqueta WORK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Promoções: Aplicar Etiqueta PROMOTIONS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pessoal: Aplicar Etiqueta PERSONAL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Urgente: Aplicar Etiqueta URGENT": {
+      "main": [
+        [
+          {
+            "node": "Urgente: Notificar no Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Urgente: Notificar no Telegram": {
+      "main": [
+        [
+          {
+            "node": "Urgente: Fim do Fluxo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Financeiro: Aplicar Etiqueta FINANCIAL": {
+      "main": [
+        [
+          {
+            "node": "Financeiro: Mover para a Pasta Financial",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Financeiro: Mover para a Pasta Financial": {
+      "main": [
+        [
+          {
+            "node": "Financeiro: Fim do Fluxo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trabalho: Aplicar Etiqueta WORK": {
+      "main": [
+        [
+          {
+            "node": "Trabalho: Marcar como Importante (Estrela)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trabalho: Marcar como Importante (Estrela)": {
+      "main": [
+        [
+          {
+            "node": "Trabalho: Fim do Fluxo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Promoções: Aplicar Etiqueta PROMOTIONS": {
+      "main": [
+        [
+          {
+            "node": "Promoções: Arquivar (Remover da Caixa de Entrada)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Promoções: Arquivar (Remover da Caixa de Entrada)": {
+      "main": [
+        [
+          {
+            "node": "Promoções: Fim do Fluxo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pessoal: Aplicar Etiqueta PERSONAL": {
+      "main": [
+        [
+          {
+            "node": "Pessoal: Fim do Fluxo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gatilho de Erro": {
+      "main": [
+        [
+          {
+            "node": "Erro: Enviar E-mail de Alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "3f6c1a52-0f9e-4d7a-9c2b-8a1e5d4c7b90",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
